@@ -1,0 +1,165 @@
+Bootstrap: docker
+From: nvidia/cuda:12.6.3-devel-ubuntu22.04
+
+# Dedicated OpenVLA + LIBERO evaluation image.
+# All Python dependencies are installed inside /opt/venv in the SIF.
+
+%files
+    eval_forgetting.py /opt/kappatune_eval/eval_forgetting.py
+    train_continual.py /opt/kappatune_eval/train_continual.py
+    data_utils.py /opt/kappatune_eval/data_utils.py
+    kappatune_vla.py /opt/kappatune_eval/kappatune_vla.py
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        python3.10 python3.10-venv python3.10-dev \
+        build-essential git ca-certificates cmake pkg-config ffmpeg \
+        libgl1 libegl1 libgles2 libglib2.0-0 libosmesa6 libosmesa6-dev \
+        libglfw3 libglew-dev patchelf zstd
+    rm -rf /var/lib/apt/lists/*
+
+    python3.10 -m venv /opt/venv
+    . /opt/venv/bin/activate
+    python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+
+    cat > /opt/eval-constraints.txt <<'EOF'
+numpy==1.26.4
+torch==2.7.1+cu126
+torchvision==0.22.1+cu126
+transformers==4.40.1
+tokenizers==0.19.1
+huggingface-hub==0.36.2
+peft==0.11.1
+accelerate==1.15.0
+timm==0.9.10
+lerobot==0.3.3
+robosuite==1.4.1
+mujoco==3.3.2
+gym==0.25.2
+matplotlib==3.8.4
+easydict==1.13
+bddl==3.6.0
+EOF
+
+    python -m pip install --no-cache-dir \
+        torch==2.7.1+cu126 torchvision==0.22.1+cu126 \
+        --index-url https://download.pytorch.org/whl/cu126
+
+    python -m pip install --no-cache-dir -c /opt/eval-constraints.txt \
+        numpy==1.26.4 transformers==4.40.1 tokenizers==0.19.1 \
+        huggingface-hub==0.36.2 peft==0.11.1 accelerate==1.15.0 \
+        timm==0.9.10 lerobot==0.3.3 pillow pyyaml imageio 'imageio[ffmpeg]'
+
+    python -m pip install --no-cache-dir -c /opt/eval-constraints.txt \
+        numpy==1.26.4 mujoco==3.3.2 robosuite==1.4.1 gym==0.25.2 \
+        matplotlib==3.8.4 easydict==1.13 bddl==3.6.0 cloudpickle
+
+    git clone --depth 1 \
+        https://github.com/Lifelong-Robot-Learning/LIBERO.git /opt/LIBERO
+    python -m pip install --no-cache-dir --no-deps -e /opt/LIBERO
+
+    SITE_PACKAGES="$(python -c 'import site; print(site.getsitepackages()[0])')"
+    printf '%s\n' /opt/LIBERO /opt/kappatune_eval \
+        > "${SITE_PACKAGES}/kappatune_eval_paths.pth"
+
+    # Pre-create LIBERO's config so its first import is non-interactive.
+    # The evaluator needs BDDL files, fixed initial states, and assets. It does
+    # not require the original HDF5 demonstrations, but LIBERO still requires a
+    # datasets entry in config.yaml.
+    mkdir -p /opt/libero_config /opt/LIBERO/libero/datasets
+    cat > /opt/libero_config/config.yaml <<'EOF'
+benchmark_root: /opt/LIBERO/libero/libero
+bddl_files: /opt/LIBERO/libero/libero/bddl_files
+init_states: /opt/LIBERO/libero/libero/init_files
+datasets: /opt/LIBERO/libero/datasets
+assets: /opt/LIBERO/libero/libero/assets
+EOF
+
+    # Restore exact ABI-sensitive pins after all resolver operations.
+    python -m pip install --no-cache-dir --force-reinstall --no-deps \
+        torch==2.7.1+cu126 torchvision==0.22.1+cu126 \
+        --index-url https://download.pytorch.org/whl/cu126
+    python -m pip install --no-cache-dir --force-reinstall --no-deps \
+        numpy==1.26.4 transformers==4.40.1 tokenizers==0.19.1 \
+        huggingface-hub==0.36.2 peft==0.11.1 \
+        mujoco==3.3.2 robosuite==1.4.1
+
+    # Build-time import validation. CUDA devices are normally unavailable while
+    # building, so validate the compiled CUDA version rather than availability.
+    LIBERO_CONFIG_PATH=/opt/libero_config \
+    MUJOCO_GL=osmesa \
+    PYOPENGL_PLATFORM=osmesa \
+    python - <<'PY'
+import sys
+import numpy
+import torch
+import torchvision
+import transformers
+import tokenizers
+import peft
+import mujoco
+import robosuite
+import gym
+from libero.libero import benchmark
+from libero.libero.envs import OffScreenRenderEnv
+from libero.libero import get_libero_path
+from transformers.tokenization_utils import PaddingStrategy
+
+print('python:', sys.version)
+print('numpy:', numpy.__version__)
+print('torch:', torch.__version__, 'compiled CUDA:', torch.version.cuda)
+print('torchvision:', torchvision.__version__)
+print('transformers:', transformers.__version__)
+print('tokenizers:', tokenizers.__version__)
+print('peft:', peft.__version__)
+print('mujoco:', mujoco.__version__)
+print('robosuite:', robosuite.__version__)
+print('gym:', gym.__version__)
+print('bddl_files:', get_libero_path('bddl_files'))
+print('init_states:', get_libero_path('init_states'))
+print('assets:', get_libero_path('assets'))
+print('suites:', sorted(benchmark.get_benchmark_dict().keys()))
+print('OffScreenRenderEnv:', OffScreenRenderEnv)
+
+assert numpy.__version__ == '1.26.4'
+assert torch.__version__ == '2.7.1+cu126'
+assert torch.version.cuda == '12.6'
+assert torchvision.__version__ == '0.22.1+cu126'
+assert transformers.__version__ == '4.40.1'
+assert tokenizers.__version__ == '0.19.1'
+assert peft.__version__ == '0.11.1'
+assert mujoco.__version__ == '3.3.2'
+assert robosuite.__version__ == '1.4.1'
+assert gym.__version__ == '0.25.2'
+assert PaddingStrategy is not None
+print('Evaluation image import validation passed.')
+PY
+
+    python -m pip check
+    chmod -R a+rX /opt
+
+%environment
+    export VIRTUAL_ENV=/opt/venv
+    export PATH="/opt/venv/bin:${PATH}"
+    export PYTHONNOUSERSITE=1
+    export PYTHONPATH="/opt/kappatune_eval:/opt/LIBERO:${PYTHONPATH:-}"
+    export LIBERO_CONFIG_PATH=/opt/libero_config
+    export MUJOCO_GL=osmesa
+    export PYOPENGL_PLATFORM=osmesa
+    export TOKENIZERS_PARALLELISM=false
+
+%runscript
+    exec python3 /opt/kappatune_eval/eval_forgetting.py "$@"
+
+%labels
+    Project KappaTune-VLA-Evaluation
+    Python 3.10
+    PyTorch 2.7.1+cu126
+    Transformers 4.40.1
+    MuJoCo 3.3.2
+    robosuite 1.4.1
+    NumPy 1.26.4

@@ -1,0 +1,232 @@
+Bootstrap: docker
+From: nvidia/cuda:12.6.3-devel-ubuntu22.04
+
+# Coherent dependency family:
+#   PyTorch 2.7.1 + TorchVision 0.22.1, CUDA 12.6
+#   LeRobot 0.3.3, whose dependency family supports HF Hub 0.x
+#   Transformers 4.40.1 + Hugging Face Hub 0.36.2 for OpenVLA
+#
+# The standalone lerobot-dataset 0.5.0 is deliberately NOT used because it
+# requires huggingface-hub>=1.0, which conflicts with Transformers 4.40.1.
+# Flash Attention is omitted; PyTorch SDPA is used instead.
+
+%files
+    kappatune_vla_continual /opt/kappatune_vla_continual
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        software-properties-common build-essential ninja-build git wget curl \
+        ca-certificates cmake pkg-config gnupg libgl1 libegl1 libglib2.0-0 \
+        libosmesa6-dev libglfw3 libglew-dev patchelf zstd ffmpeg
+    rm -rf /var/lib/apt/lists/*
+
+    mkdir -p /usr/lib/bfd-plugins
+    GCC_VER="$(gcc -dumpversion | cut -d. -f1)"
+    ln -sf "/usr/lib/gcc/x86_64-linux-gnu/${GCC_VER}/liblto_plugin.so" \
+        /usr/lib/bfd-plugins/liblto_plugin.so
+
+    # Python 3.12
+    mkdir -p /etc/apt/keyrings
+    wget -qO- \
+      "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xF23C5A6CF475977595C89F51BA6932366A755776" \
+      | gpg --dearmor -o /etc/apt/keyrings/deadsnakes.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/deadsnakes.gpg] https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu jammy main" \
+      > /etc/apt/sources.list.d/deadsnakes.list
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        python3.12 python3.12-venv python3.12-dev
+    rm -rf /var/lib/apt/lists/*
+
+    python3.12 -m venv /opt/venv
+    . /opt/venv/bin/activate
+    python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+
+    cat > /opt/kappatune-vla-constraints.txt <<'EOF'
+torch==2.7.1+cu126
+torchvision==0.22.1+cu126
+transformers==4.40.1
+tokenizers==0.19.1
+huggingface-hub==0.36.2
+lerobot==0.3.3
+timm==0.9.10
+peft==0.21.0
+accelerate==1.15.0
+EOF
+
+    # Matched CUDA 12.6 binary pair.
+    python -m pip install --no-cache-dir \
+        "torch==2.7.1+cu126" \
+        "torchvision==0.22.1+cu126" \
+        --index-url https://download.pytorch.org/whl/cu126
+
+    # OpenVLA-compatible Hugging Face stack.
+    python -m pip install --no-cache-dir \
+        -c /opt/kappatune-vla-constraints.txt \
+        "transformers==4.40.1" \
+        "tokenizers==0.19.1" \
+        "huggingface-hub==0.36.2" \
+        "accelerate==1.15.0" \
+        "peft==0.21.0" \
+        "timm==0.9.10"
+
+    # LeRobot 0.3.3 belongs to the HF Hub 0.x dependency generation and
+    # contains LeRobotDataset v3 support without requiring HF Hub >=1.0.
+    python -m pip install --no-cache-dir \
+        -c /opt/kappatune-vla-constraints.txt \
+        "lerobot==0.3.3"
+
+    # LIBERO simulator stack.
+    git clone --depth 1 \
+        https://github.com/Lifelong-Robot-Learning/LIBERO.git /opt/LIBERO
+    python -m pip install --no-cache-dir \
+        -c /opt/kappatune-vla-constraints.txt -e /opt/LIBERO
+    python -m pip install --no-cache-dir \
+        -c /opt/kappatune-vla-constraints.txt \
+        "robosuite==1.4.1" "mujoco>=3.1"
+
+    # Remove all packages managed explicitly above, plus flash-attn, from the
+    # project requirements. This prevents dependency resolver drift.
+    python - <<'PYFILTER'
+from pathlib import Path
+import re
+
+source = Path("/opt/kappatune_vla_continual/requirements.txt")
+target = Path("/opt/kappatune-vla-requirements-filtered.txt")
+managed = {
+    "torch", "torchvision", "torchaudio", "transformers", "tokenizers",
+    "huggingface-hub", "accelerate", "peft", "timm", "lerobot",
+    "lerobot-dataset", "flash-attn",
+}
+
+kept = []
+removed = []
+for raw in source.read_text().splitlines():
+    stripped = raw.strip()
+    if not stripped or stripped.startswith("#"):
+        kept.append(raw)
+        continue
+    requirement = stripped.split("#", 1)[0].strip()
+    name = re.split(r"[<>=!~\[;@ ]", requirement, maxsplit=1)[0]
+    normalized = name.lower().replace("_", "-")
+    if normalized in managed:
+        removed.append(raw)
+    else:
+        kept.append(raw)
+
+target.write_text("\n".join(kept) + "\n")
+print("Removed managed requirements:")
+for line in removed:
+    print("  ", line)
+PYFILTER
+
+    echo "Filtered project requirements:"
+    cat /opt/kappatune-vla-requirements-filtered.txt
+    if [ -s /opt/kappatune-vla-requirements-filtered.txt ]; then
+        python -m pip install --no-cache-dir \
+            -c /opt/kappatune-vla-constraints.txt \
+            -r /opt/kappatune-vla-requirements-filtered.txt
+    fi
+
+    # Restore exact binary/API versions after all resolver operations.
+    python -m pip install --no-cache-dir --force-reinstall --no-deps \
+        "torch==2.7.1+cu126" \
+        "torchvision==0.22.1+cu126" \
+        --index-url https://download.pytorch.org/whl/cu126
+    python -m pip install --no-cache-dir --force-reinstall --no-deps \
+        "transformers==4.40.1" \
+        "tokenizers==0.19.1" \
+        "huggingface-hub==0.36.2"
+
+    SITE_PACKAGES="$(python -c 'import site; print(site.getsitepackages()[0])')"
+
+    # Historical import bridge expected by data_utils.py.
+    mkdir -p "${SITE_PACKAGES}/lerobot/common/datasets"
+    cat > "${SITE_PACKAGES}/lerobot/common/__init__.py" <<'PY'
+"""Historical LeRobot compatibility namespace."""
+PY
+    cat > "${SITE_PACKAGES}/lerobot/common/datasets/__init__.py" <<'PY'
+from .lerobot_dataset import LeRobotDataset
+__all__ = ["LeRobotDataset"]
+PY
+    cat > "${SITE_PACKAGES}/lerobot/common/datasets/lerobot_dataset.py" <<'PY'
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+__all__ = ["LeRobotDataset"]
+PY
+
+    # Transformers 4.40.1 provides the tokenizer imports expected by OpenVLA.
+    # No sitecustomize monkey patch is required.
+
+    # Fresh-process validation.
+    MUJOCO_GL=osmesa PYOPENGL_PLATFORM=osmesa python - <<'PY'
+import torch, torchvision, transformers, tokenizers, huggingface_hub
+import peft, accelerate, lerobot, robosuite, mujoco
+from transformers.tokenization_utils import (
+    PaddingStrategy, PreTokenizedInput, TextInput, TruncationStrategy,
+)
+from lerobot.datasets.lerobot_dataset import LeRobotDataset as CurrentPath
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset as OldPath
+
+print("torch:", torch.__version__)
+print("compiled CUDA:", torch.version.cuda)
+print("torchvision:", torchvision.__version__)
+print("transformers:", transformers.__version__)
+print("huggingface_hub:", huggingface_hub.__version__)
+print("lerobot:", getattr(lerobot, "__version__", "0.3.3"))
+print("LeRobotDataset:", CurrentPath)
+print("SDPA:", hasattr(torch.nn.functional, "scaled_dot_product_attention"))
+
+assert torch.__version__ == "2.7.1+cu126", torch.__version__
+assert torch.version.cuda == "12.6", torch.version.cuda
+assert torchvision.__version__ == "0.22.1+cu126", torchvision.__version__
+assert transformers.__version__ == "4.40.1", transformers.__version__
+assert tokenizers.__version__ == "0.19.1", tokenizers.__version__
+assert huggingface_hub.__version__ == "0.36.2", huggingface_hub.__version__
+assert CurrentPath is OldPath
+assert hasattr(torch.nn.functional, "scaled_dot_product_attention")
+assert PaddingStrategy is not None
+assert PreTokenizedInput is not None
+assert TextInput is not None
+assert TruncationStrategy is not None
+print("Strict container validation passed.")
+PY
+
+    python -m pip check
+    chmod -R a+rX /opt
+
+%environment
+    export VIRTUAL_ENV=/opt/venv
+    export PATH="/opt/venv/bin:${PATH}"
+    export PYTHONNOUSERSITE=1
+    export PYTHONPATH="/opt/kappatune_vla_continual/src:/opt/LIBERO:${PYTHONPATH:-}"
+    export MUJOCO_GL=osmesa
+    export PYOPENGL_PLATFORM=osmesa
+    export HF_HOME=/opt/hf_cache
+    export TOKENIZERS_PARALLELISM=false
+
+%runscript
+    exec python3 /opt/kappatune_vla_continual/src/train_continual.py "$@"
+
+%labels
+    Author Oswaldo-Ludwig
+    Project KappaTune-VLA
+    Base nvidia/cuda:12.6.3-devel-ubuntu22.04
+    PyTorch 2.7.1+cu126
+    Transformers 4.40.1
+    HuggingFaceHub 0.36.2
+    LeRobot 0.3.3
+    Attention PyTorch-SDPA-no-flash-attn
+    Target H100-sm90-driver-CUDA-12.9
+
+%help
+    Build:
+      singularity build --fakeroot kappatune_vla_cuda12_v11.sif kappatune_vla_cuda12_v11.def
+
+    Validate:
+      srun singularity exec --nv --cleanenv kappatune_vla_cuda12_v11.sif \
+        python3 -c 'import torch, transformers, lerobot; print(torch.__version__, torch.version.cuda, transformers.__version__, torch.cuda.is_available())'
+
+    Expected: 2.7.1+cu126 12.6 4.40.1 True
