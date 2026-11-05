@@ -3,8 +3,7 @@ if [[ -z "${BASH_VERSION:-}" ]]; then
   exec bash "$0" "$@"
 fi
 # Sequential KappaTune + dynamics-risk-weighted adjustment suppression.
-# Run this script inside an existing GPU allocation, or use the companion
-# run_kappa_risk_experiment.sh launcher.
+# Run this script inside an existing GPU allocation.
 set -Eeuo pipefail
 trap 'status=$?; echo "ERROR: ${BASH_SOURCE[0]}:${LINENO}: command failed (${status}): ${BASH_COMMAND}" >&2; exit ${status}' ERR
 export PYTHONUNBUFFERED=1
