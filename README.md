@@ -126,6 +126,7 @@ If you use this implementation, please cite the associated paper:
 ```bibtex
 @article{drap2026,
   title   = {DRAP: Dynamics-Risk Adaptive Plasticity for Continual Learning in Physical AI},
+  author  = {Oswaldo Ludwig},
   journal = {arXiv preprint arXiv:2611.05029},
   year    = {2026},
   url     = {https://arxiv.org/abs/2611.05029}
