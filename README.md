@@ -132,5 +132,3 @@ If you use this implementation, please cite the associated paper:
   url     = {https://arxiv.org/abs/2611.05029}
 }
 ```
-
-Please verify the paper's author list and preferred citation format on the [arXiv abstract page](https://arxiv.org/abs/2611.05029) before using this BibTeX entry in a publication.
