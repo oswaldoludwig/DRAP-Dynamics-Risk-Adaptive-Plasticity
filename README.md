@@ -5,8 +5,7 @@
 This repository contains an OpenVLA/LIBERO continual-learning implementation that combines offline estimates of local task dynamics with risk-weighted parameter-importance tracking and per-tensor update suppression. The goal is to reduce interference with parameters associated with historically important, high-dynamics-risk data while adapting to a sequence of robot manipulation suites.
 
 > **Paper:** [arXiv:2611.05029](https://arxiv.org/abs/2611.05029) · [PDF](https://arxiv.org/pdf/2611.05029)
->
-> This README describes the implementation currently present in this repository. For the paper's formal definitions, experimental protocol, and reported results, consult the paper.
+
 
 ## Method at a glance
 
